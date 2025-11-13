@@ -1,0 +1,29 @@
+# Virtual environments
+venv/
+.env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Compiled shared libraries
+*.so
+*.dylib
+*.dll
+
+# Logs
+*.log
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# PyTorch model weights
+*.pth
+*.pt
