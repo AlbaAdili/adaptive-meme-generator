@@ -1,8 +1,9 @@
 import torch
-from diffusers import StableDiffusionPipeline
+from diffusers import StableDiffusionPipeline, StableDiffusionXLPipeline
 from time import time
 import os
 
+# Device detection
 if torch.cuda.is_available():
     DEVICE = "cuda"
 elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -10,7 +11,7 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
 else:
     DEVICE = "cpu"
 
-# choose dtype depending on device
+# dtype
 if DEVICE in ("cuda", "mps"):
     PIPE_DTYPE = torch.float16
 else:
@@ -24,16 +25,25 @@ class DiffusionGenerator:
 
     def __init__(self, model_name="runwayml/stable-diffusion-v1-5",
                  steps=30, device=DEVICE, size=(512, 512)):
+
         self.model_name = model_name
         self.steps = steps
         self.device = device
         self.size = size
 
         print(f"Loading model: {model_name} on {device}")
-        self.pipe = StableDiffusionPipeline.from_pretrained(
-            model_name,
-            torch_dtype=PIPE_DTYPE,   # <— works for CUDA + MPS + CPU
-        ).to(device)
+
+        # Detect SDXL and load the correct pipeline
+        if "xl" in model_name.lower() or "sdxl" in model_name.lower():
+            self.pipe = StableDiffusionXLPipeline.from_pretrained(
+                model_name,
+                torch_dtype=PIPE_DTYPE,
+            ).to(device)
+        else:
+            self.pipe = StableDiffusionPipeline.from_pretrained(
+                model_name,
+                torch_dtype=PIPE_DTYPE,
+            ).to(device)
 
         os.makedirs("results/images", exist_ok=True)
 
