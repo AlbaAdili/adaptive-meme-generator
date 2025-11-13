@@ -1,6 +1,6 @@
 import asyncio
-from queue.controller import AdaptiveController
-from queue.load_simulator import simulate_load
+from queueing.controller import AdaptiveController
+from queueing.load_simulator import simulate_load
 
 prompts = [
     "When your code works on first try",
@@ -13,14 +13,15 @@ prompts = [
 async def main():
     controller = AdaptiveController()
 
-    # Start worker
+    # Start the worker (handles queued meme requests)
     asyncio.create_task(controller.worker())
 
-    # Start load simulation
+    # Start load simulation (pushes prompts into the queue)
     asyncio.create_task(simulate_load(controller, prompts, rate=0.4))
 
     print("Adaptive Meme Generator Running...")
     while True:
         await asyncio.sleep(1)
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
