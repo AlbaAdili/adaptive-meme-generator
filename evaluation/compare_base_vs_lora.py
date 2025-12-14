@@ -54,7 +54,15 @@ lora_pipe = StableDiffusionPipeline.from_pretrained(
     safety_checker=None,
 ).to(DEVICE)
 
-lora_pipe.load_lora_weights(LORA_PATH)
+from peft import PeftModel
+
+print("Attaching PEFT LoRA to UNet...")
+lora_pipe.unet = PeftModel.from_pretrained(
+    lora_pipe.unet,
+    LORA_PATH,
+)
+lora_pipe.unet.eval()
+
 
 # --------------------------------------------------
 # CLIP SCORE FUNCTION
