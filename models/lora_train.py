@@ -10,9 +10,9 @@ from diffusers import StableDiffusionPipeline, DDPMScheduler
 from diffusers.models.attention_processor import LoRAAttnProcessor
 
 
-# =========================
+# ======================
 # CONFIG
-# =========================
+# ======================
 MODEL_ID = "runwayml/stable-diffusion-v1-5"
 DATA_DIR = "data/meme_train"
 OUTPUT_DIR = "lora_weights/meme_lora"
@@ -20,15 +20,14 @@ OUTPUT_DIR = "lora_weights/meme_lora"
 EPOCHS = 2
 BATCH_SIZE = 1
 LR = 1e-4
-RANK = 4
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 
 
-# =========================
+# ======================
 # DATASET (IMAGES ONLY)
-# =========================
+# ======================
 class MemeDataset(Dataset):
     def __init__(self, root):
         self.files = [
@@ -37,7 +36,7 @@ class MemeDataset(Dataset):
             if f.lower().endswith(("png", "jpg", "jpeg"))
         ]
         if len(self.files) == 0:
-            raise RuntimeError("No images found in dataset")
+            raise RuntimeError("No images found in data/meme_train")
 
         self.transform = transforms.Compose([
             transforms.Resize((512, 512)),
@@ -54,13 +53,12 @@ class MemeDataset(Dataset):
         return self.transform(img)
 
 
-# =========================
+# ======================
 # MAIN
-# =========================
+# ======================
 def main():
     print(f"Device: {DEVICE} | dtype: {DTYPE}")
 
-    # ---- Load pipeline
     pipe = StableDiffusionPipeline.from_pretrained(
         MODEL_ID,
         torch_dtype=DTYPE,
@@ -69,52 +67,36 @@ def main():
 
     pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
 
-    # ---- Freeze base model
+    # Freeze base model
     pipe.vae.requires_grad_(False)
     pipe.text_encoder.requires_grad_(False)
     pipe.unet.requires_grad_(False)
 
-    # =========================
-    # Inject LoRA into UNet
-    # =========================
+    # ======================
+    # Inject LoRA (SAFE VERSION)
+    # ======================
     print("Injecting LoRA attention processors...")
     lora_attn_procs = {}
 
-    for name, attn_proc in pipe.unet.attn_processors.items():
-        cross_attention_dim = (
-            attn_proc.cross_attention_dim
-            if hasattr(attn_proc, "cross_attention_dim")
-            else None
-        )
-
-        hidden_size = (
-            attn_proc.hidden_size
-            if hasattr(attn_proc, "hidden_size")
-            else pipe.unet.config.block_out_channels[0]
-        )
-
-        lora_attn_procs[name] = LoRAAttnProcessor(
-            hidden_size=hidden_size,
-            cross_attention_dim=cross_attention_dim,
-            rank=RANK,
-        )
+    for name in pipe.unet.attn_processors.keys():
+        lora_attn_procs[name] = LoRAAttnProcessor()
 
     pipe.unet.set_attn_processor(lora_attn_procs)
 
-    # ---- Collect trainable params
+    # Enable training only for LoRA
     trainable_params = []
     for p in pipe.unet.parameters():
         if p.requires_grad:
             trainable_params.append(p)
 
     if len(trainable_params) == 0:
-        raise RuntimeError("LoRA injection failed — no trainable parameters")
+        raise RuntimeError("LoRA injection failed")
 
     optimizer = torch.optim.AdamW(trainable_params, lr=LR)
 
-    # =========================
+    # ======================
     # Empty text embedding
-    # =========================
+    # ======================
     with torch.no_grad():
         tokens = pipe.tokenizer(
             [""],
@@ -126,9 +108,9 @@ def main():
 
         empty_emb = pipe.text_encoder(tokens)[0]
 
-    # =========================
+    # ======================
     # Training
-    # =========================
+    # ======================
     dataset = MemeDataset(DATA_DIR)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
@@ -172,13 +154,13 @@ def main():
 
         print(f"Epoch {epoch+1} finished")
 
-    # =========================
+    # ======================
     # Save LoRA
-    # =========================
+    # ======================
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     pipe.unet.save_attn_procs(OUTPUT_DIR)
 
-    print(f" LoRA weights saved to: {OUTPUT_DIR}")
+    print(f" LoRA saved to {OUTPUT_DIR}")
 
 
 if __name__ == "__main__":
