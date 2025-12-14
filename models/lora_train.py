@@ -1,32 +1,29 @@
-# models/lora_train.py
 import os
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
+from diffusers import StableDiffusionPipeline, DDPMScheduler
+from diffusers.models.attention_processor import LoRAAttnProcessor
 from tqdm import tqdm
 
-from diffusers import StableDiffusionPipeline, DDPMScheduler
-from peft import LoraConfig, get_peft_model
-
-# ------------------------------------------------------------
+# ------------------------
 # CONFIG
-# ------------------------------------------------------------
+# ------------------------
 MODEL_ID = "runwayml/stable-diffusion-v1-5"
 DATA_DIR = "data/meme_train"
 OUTPUT_DIR = "lora_weights/meme_lora"
 
-BATCH_SIZE = 1
-EPOCHS = 2          # keep small (demo-quality)
-LR = 1e-4
 IMAGE_SIZE = 512
+BATCH_SIZE = 1
+EPOCHS = 2
+LR = 1e-4
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-dtype = torch.float16 if device == "cuda" else torch.float32
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# ------------------------------------------------------------
-# DATASET (images only, captions intentionally ignored)
-# ------------------------------------------------------------
+# ------------------------
+# DATASET (images only)
+# ------------------------
 class MemeDataset(Dataset):
     def __init__(self, folder):
         self.files = [
@@ -45,84 +42,96 @@ class MemeDataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        image = Image.open(self.files[idx]).convert("RGB")
-        return self.transform(image)
+        img = Image.open(self.files[idx]).convert("RGB")
+        return self.transform(img)
 
-# ------------------------------------------------------------
+# ------------------------
 # LOAD PIPELINE
-# ------------------------------------------------------------
-print("Loading Stable Diffusion...")
+# ------------------------
+print(" Loading Stable Diffusion...")
 pipe = StableDiffusionPipeline.from_pretrained(
     MODEL_ID,
-    torch_dtype=dtype,
-)
-pipe.to(device)
-pipe.safety_checker = None
+    torch_dtype=torch.float16,
+).to(DEVICE)
 
-pipe.unet.requires_grad_(False)
-pipe.text_encoder.requires_grad_(False)
+pipe.safety_checker = None
+pipe.enable_attention_slicing()
 
 noise_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
 
-# ------------------------------------------------------------
-# APPLY LoRA TO UNET (CORRECT WAY)
-# ------------------------------------------------------------
-lora_config = LoraConfig(
-    r=8,
-    lora_alpha=16,
-    lora_dropout=0.1,
-    bias="none",
-    target_modules=["to_q", "to_k", "to_v", "to_out.0"],
-)
+# ------------------------
+# ADD LoRA TO UNET
+# ------------------------
+print(" Injecting LoRA layers...")
+lora_attn_procs = {}
 
-pipe.unet = get_peft_model(pipe.unet, lora_config)
+for name, attn in pipe.unet.attn_processors.items():
+    lora_attn_procs[name] = LoRAAttnProcessor(
+        hidden_size=attn.hidden_size,
+        cross_attention_dim=attn.cross_attention_dim,
+        rank=8,
+    )
+
+pipe.unet.set_attn_processor(lora_attn_procs)
 pipe.unet.train()
 
 optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=LR)
 
-# ------------------------------------------------------------
-# TRAINING LOOP (REAL DIFFUSION LOSS)
-# ------------------------------------------------------------
+# ------------------------
+# TRAINING LOOP (LATENT SPACE)
+# ------------------------
 dataset = MemeDataset(DATA_DIR)
 loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-print(f"Training LoRA on {len(dataset)} meme images")
+print(f" Training LoRA on {len(dataset)} meme images")
 
 for epoch in range(EPOCHS):
-    for images in tqdm(loader, desc=f"Epoch {epoch+1}/{EPOCHS}"):
-        images = images.to(device, dtype=dtype)
+    pbar = tqdm(loader)
+    for images in pbar:
+        images = images.to(DEVICE, dtype=torch.float16)
 
-        # Sample noise
-        noise = torch.randn_like(images)
+        # Encode images → latents (4 channels!)
+        latents = pipe.vae.encode(images).latent_dist.sample()
+        latents = latents * 0.18215
+
+        noise = torch.randn_like(latents)
         timesteps = torch.randint(
             0,
-            noise_scheduler.num_train_timesteps,
-            (images.shape[0],),
-            device=device,
+            noise_scheduler.config.num_train_timesteps,
+            (latents.shape[0],),
+            device=DEVICE,
         ).long()
 
-        # Add noise
-        noisy_images = noise_scheduler.add_noise(images, noise, timesteps)
+        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-        # Predict noise
+        # Dummy text conditioning (we do NOT train text)
+        encoder_hidden_states = pipe.text_encoder(
+            pipe.tokenizer(
+                [""] * latents.shape[0],
+                padding="max_length",
+                return_tensors="pt",
+            ).input_ids.to(DEVICE)
+        )[0]
+
         noise_pred = pipe.unet(
-            noisy_images,
+            noisy_latents,
             timesteps,
-            encoder_hidden_states=None,
+            encoder_hidden_states,
         ).sample
 
         loss = torch.nn.functional.mse_loss(noise_pred, noise)
         loss.backward()
-
         optimizer.step()
         optimizer.zero_grad()
 
-    print(f"Epoch {epoch+1} completed")
+        pbar.set_description(f"Epoch {epoch+1}/{EPOCHS} | loss={loss.item():.4f}")
 
-# ------------------------------------------------------------
-# SAVE LoRA WEIGHTS
-# ------------------------------------------------------------
+print(" Training finished")
+
+# ------------------------
+# SAVE LoRA
+# ------------------------
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-pipe.unet.save_pretrained(OUTPUT_DIR)
+pipe.unet.save_attn_procs(OUTPUT_DIR)
 
-print(f"LoRA training finished. Saved to {OUTPUT_DIR}")
+print(f" LoRA weights saved to: {OUTPUT_DIR}")
