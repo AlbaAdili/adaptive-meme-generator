@@ -1,0 +1,13 @@
+torch
+torchvision
+diffusers>=0.30.0
+transformers>=4.40.0
+accelerate
+safetensors
+Pillow
+numpy
+pandas
+matplotlib
+seaborn
+scipy
+tqdm
