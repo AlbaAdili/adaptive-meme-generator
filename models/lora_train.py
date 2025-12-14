@@ -1,4 +1,4 @@
-
+# models/lora_train.py
 import os
 import torch
 from PIL import Image
@@ -16,13 +16,13 @@ MODEL_ID = "runwayml/stable-diffusion-v1-5"
 DATA_DIR = "data/meme_train"
 OUTPUT_DIR = "lora_weights/meme_lora"
 
-EPOCHS = 1         
+EPOCHS = 1
 BATCH_SIZE = 1
-LR = 1e-5            # IMPORTANT: avoids NaNs
+LR = 1e-5
 RANK = 8
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
+PIPE_DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32  # pipeline dtype
 
 
 # =========================
@@ -52,15 +52,12 @@ class MemeDataset(Dataset):
         return self.transform(img)
 
 
-# =========================
-# MAIN
-# =========================
 def main():
-    print(f"Device: {DEVICE} | dtype: {DTYPE}")
+    print(f"Device: {DEVICE} | pipeline dtype: {PIPE_DTYPE}")
 
     pipe = StableDiffusionPipeline.from_pretrained(
         MODEL_ID,
-        torch_dtype=DTYPE,
+        torch_dtype=PIPE_DTYPE,
         safety_checker=None,
     ).to(DEVICE)
 
@@ -72,7 +69,7 @@ def main():
     pipe.unet.requires_grad_(False)
 
     # =========================
-    # ADD PEFT LoRA (THE CORRECT WAY)
+    # ADD PEFT LoRA (UNet only)
     # =========================
     print("Adding PEFT LoRA adapter to UNet...")
 
@@ -86,14 +83,21 @@ def main():
 
     pipe.unet.add_adapter(lora_config)
     pipe.unet.set_adapter("default")
+    pipe.unet.train()
 
-    trainable = [p for p in pipe.unet.parameters() if p.requires_grad]
-    print(f" Trainable LoRA params: {sum(p.numel() for p in trainable)}")
+    # IMPORTANT FIX:
+    # Make LoRA trainable parameters FP32 so gradients are FP32 (no GradScaler issues)
+    trainable = []
+    for p in pipe.unet.parameters():
+        if p.requires_grad:
+            p.data = p.data.float()
+            trainable.append(p)
+
+    print(f"✅ Trainable LoRA params: {sum(p.numel() for p in trainable)}")
 
     optimizer = torch.optim.AdamW(trainable, lr=LR)
-    scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
 
-    # Empty prompt embedding (style-only training)
+    # Empty prompt embedding (style-only)
     with torch.no_grad():
         tokens = pipe.tokenizer(
             [""],
@@ -102,22 +106,18 @@ def main():
             max_length=pipe.tokenizer.model_max_length,
             return_tensors="pt",
         ).input_ids.to(DEVICE)
-        empty_emb = pipe.text_encoder(tokens)[0]
+        empty_emb = pipe.text_encoder(tokens)[0]  # (1, 77, hidden)
 
     dataset = MemeDataset(DATA_DIR)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-
-    pipe.unet.train()
     print(f"Training on {len(dataset)} images...")
 
-    # =========================
-    # TRAIN
-    # =========================
     for epoch in range(EPOCHS):
         pbar = tqdm(loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
         for batch in pbar:
-            batch = batch.to(DEVICE, dtype=DTYPE)
+            batch = batch.to(DEVICE, dtype=PIPE_DTYPE)
 
+            # Encode to latents
             with torch.no_grad():
                 latents = pipe.vae.encode(batch).latent_dist.sample()
                 latents = latents * pipe.vae.config.scaling_factor
@@ -135,35 +135,34 @@ def main():
 
             optimizer.zero_grad(set_to_none=True)
 
-            with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
-                noise_pred = pipe.unet(
-                    noisy_latents,
-                    timesteps,
-                    encoder_hidden_states=encoder_hidden_states,
-                ).sample
+            # Forward (model in FP16), loss in FP32
+            noise_pred = pipe.unet(
+                noisy_latents,
+                timesteps,
+                encoder_hidden_states=encoder_hidden_states,
+            ).sample
 
-                loss = torch.nn.functional.mse_loss(
-                    noise_pred.float(), noise.float()
-                )
+            loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
 
             if torch.isnan(loss):
                 pbar.set_postfix(loss="nan-skip")
                 continue
 
-            scaler.scale(loss).backward()
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
 
             pbar.set_postfix(loss=float(loss.detach().cpu()))
 
-  
+    # =========================
+    # SAVE LoRA (adapter files)
+    # =========================
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     pipe.unet.save_pretrained(OUTPUT_DIR, safe_serialization=True)
 
-    print(" LoRA training finished")
-    print(f"Saved to: {OUTPUT_DIR}")
-    print("Files created:")
+    print("LoRA training finished")
+    print(f" Saved to: {OUTPUT_DIR}")
+    print("Expected files:")
     print(" - adapter_model.safetensors")
     print(" - adapter_config.json")
 
