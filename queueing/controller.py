@@ -1,4 +1,3 @@
-# queueing/controller.py
 import asyncio
 import time
 import os
@@ -8,9 +7,9 @@ from models.generate_image import DiffusionGenerator
 from models.gif_creator import create_gif
 from evaluation.measure_metrics import log_request
 
-# ------------------------------------------------------------
+
 # Device detection
-# ------------------------------------------------------------
+
 if torch.cuda.is_available():
     DEVICE = "cuda"
 elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -40,9 +39,9 @@ class AdaptiveController:
         print(f"[Controller] Fast LoRA: {fast_lora}")
         print(f"[Controller] Quality LoRA: {quality_lora}")
 
-        # --------------------------------------------------------
+
         # Fast model (SD 1.5 + LoRA)
-        # --------------------------------------------------------
+     
         self.fast_model = DiffusionGenerator(
             "runwayml/stable-diffusion-v1-5",
             steps=20,
@@ -51,9 +50,9 @@ class AdaptiveController:
             lora_path=fast_lora,
         )
 
-        # --------------------------------------------------------
+
         # Quality model
-        # --------------------------------------------------------
+     
         if DEVICE == "mps":
             print("[Controller] SDXL disabled on Mac MPS — using SD 1.5")
             self.quality_model = DiffusionGenerator(
