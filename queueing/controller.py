@@ -1,6 +1,6 @@
 import asyncio
 import time
-
+import os
 import torch
 
 from models.generate_image import DiffusionGenerator
@@ -26,35 +26,51 @@ LOW_LOAD = 2    # queue length below which we go back to quality mode
 class AdaptiveController:
     """Queue-based controller that switches models based on load."""
 
-    def __init__(self, fast_lora: str | None = None, quality_lora: str | None = None):
+    def __init__(
+        self,
+        fast_lora: str | None = "lora_weights/meme_lora",
+        quality_lora: str | None = "lora_weights/meme_lora",
+    ):
         self.queue: asyncio.Queue = asyncio.Queue()
 
-        # Fast model (SD 1.5)
+        
+        fast_lora = fast_lora if fast_lora and os.path.exists(fast_lora) else None
+        quality_lora = quality_lora if quality_lora and os.path.exists(quality_lora) else None
+
+        print(f"[Controller] Fast LoRA: {fast_lora}")
+        print(f"[Controller] Quality LoRA: {quality_lora}")
+
+        # --------------------------------------------------------
+        # Fast model (SD 1.5 + LoRA)
+        # --------------------------------------------------------
         self.fast_model = DiffusionGenerator(
-            "runwayml/stable-diffusion-v1-5",
+            model_id="runwayml/stable-diffusion-v1-5",
             steps=20,
             device=DEVICE,
             size=(512, 512),
             lora_path=fast_lora,
         )
 
-        # Quality model (SDXL on CUDA, SD1.5 on Mac)
+        # --------------------------------------------------------
+        # Quality model
+        # --------------------------------------------------------
         if DEVICE == "mps":
-            print("⚠️ SDXL disabled on Mac MPS — using SD1.5 for both modes")
+            print("[Controller] SDXL disabled on Mac MPS — using SD 1.5")
             self.quality_model = DiffusionGenerator(
-                "runwayml/stable-diffusion-v1-5",
-                steps=30,  # more steps → higher quality
+                model_id="runwayml/stable-diffusion-v1-5",
+                steps=30,
                 device=DEVICE,
                 size=(512, 512),
                 lora_path=quality_lora or fast_lora,
             )
         else:
+            # SDXL does NOT use your SD1.5 LoRA
             self.quality_model = DiffusionGenerator(
-                "stabilityai/stable-diffusion-xl-base-1.0",
+                model_id="stabilityai/stable-diffusion-xl-base-1.0",
                 steps=50,
                 device=DEVICE,
                 size=(768, 768),
-                lora_path=quality_lora,
+                lora_path=None,  # correct: SDXL LoRA would be different
             )
 
         self.current_mode: str = "quality"
@@ -79,18 +95,15 @@ class AdaptiveController:
         while True:
             job = await self.queue.get()
 
-            # Jobs come from load_simulator as dicts
             if isinstance(job, dict):
                 prompt = job.get("prompt", "")
-                arrival_ts = job.get("arrival_ts", None)
-                job_id = job.get("id", None)
+                arrival_ts = job.get("arrival_ts")
+                job_id = job.get("id")
             else:
-                # Backwards compatibility for plain strings
                 prompt = str(job)
                 arrival_ts = None
                 job_id = None
 
-            # Number of jobs in system (this one + ones still waiting)
             queue_len = self.queue.qsize() + 1
 
             start_ts = time.time()
@@ -100,7 +113,6 @@ class AdaptiveController:
             filename = f"{int(start_ts * 1000)}.png"
             image_path, model_latency = model.generate(prompt, filename)
 
-            # Adaptive GIF length
             frames = 1 if mode == "fast" else 8
 
             if frames > 1:
@@ -111,14 +123,11 @@ class AdaptiveController:
             else:
                 gif_path = image_path
 
-            total_latency = model_latency
-
-            # Log metrics (including CLIP quality & queue stats)
             try:
                 log_request(
                     prompt=prompt,
                     mode=mode,
-                    latency=total_latency,
+                    latency=model_latency,
                     gif_frames=frames,
                     image_path=gif_path,
                     queue_len=queue_len,
@@ -126,13 +135,12 @@ class AdaptiveController:
                     start_ts=start_ts,
                 )
             except TypeError:
-                # Fallback if an older log_request signature is used
-                log_request(prompt, mode, total_latency, frames)
+                log_request(prompt, mode, model_latency, frames)
 
-            jid = f" job={job_id}" if job_id is not None else ""
+            jid = f" job={job_id}" if job_id else ""
             print(
-                f"[{mode}] prompt='{prompt}'{jid} — "
-                f"{total_latency:.2f}s | frames={frames} | queue={queue_len}"
+                f"[{mode.upper()}] '{prompt}'{jid} — "
+                f"{model_latency:.2f}s | frames={frames} | queue={queue_len}"
             )
 
             self.queue.task_done()
