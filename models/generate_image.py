@@ -38,10 +38,12 @@ class DiffusionGenerator:
         self.device = device
         self.size = size
 
-        print(f"Loading model: {model_name} on {device}")
+        print(f"[DiffusionGenerator] Loading model: {model_name} on {device}")
 
-        # SDXL vs SD1.5
-        if "xl" in model_name.lower() or "sdxl" in model_name.lower():
+        # ----------------------------------------------------
+        # Load correct pipeline (SDXL vs SD1.5)
+        # ----------------------------------------------------
+        if "xl" in model_name.lower():
             self.pipe = StableDiffusionXLPipeline.from_pretrained(
                 model_name,
                 torch_dtype=PIPE_DTYPE,
@@ -54,20 +56,27 @@ class DiffusionGenerator:
 
         self.pipe.to(device)
 
-        # Optional LoRA weights (fine-tuned on meme dataset)
-        if lora_path:
+        # ----------------------------------------------------
+        # Load LoRA weights (if provided)
+        # ----------------------------------------------------
+        if lora_path is not None:
             try:
-           
                 self.pipe.load_lora_weights(lora_path)
-                print(f"Loaded LoRA weights from {lora_path}")
+                print(f"[DiffusionGenerator] ✅ Loaded LoRA from {lora_path}")
             except Exception as e:
-                print(f"Could not load LoRA weights from {lora_path}: {e}")
+                print(
+                    f"[DiffusionGenerator] ⚠️ Failed to load LoRA from {lora_path}\n{e}"
+                )
 
-
+        # ----------------------------------------------------
+        # Disable safety checker (memes!)
+        # ----------------------------------------------------
         if hasattr(self.pipe, "safety_checker"):
             self.pipe.safety_checker = None
 
-        # Small memory optimisation
+        # ----------------------------------------------------
+        # Memory optimizations
+        # ----------------------------------------------------
         if hasattr(self.pipe, "enable_attention_slicing"):
             self.pipe.enable_attention_slicing()
 
