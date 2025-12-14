@@ -7,7 +7,7 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from diffusers import StableDiffusionPipeline, DDPMScheduler
-from diffusers.models.attention_processor import LoRAAttnProcessor
+from diffusers.models.attention_processor import LoRAAttnProcessor2_0
 
 # ----------------------------
 # CONFIG
@@ -25,7 +25,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 
 # ----------------------------
-# DATASET (images only)
+# DATASET (IMAGES ONLY)
 # ----------------------------
 class MemeDataset(Dataset):
     def __init__(self, root):
@@ -53,7 +53,6 @@ class MemeDataset(Dataset):
 def main():
     print(f"Device: {DEVICE}")
 
-    # Load pipeline
     pipe = StableDiffusionPipeline.from_pretrained(
         MODEL_ID,
         torch_dtype=DTYPE,
@@ -62,31 +61,22 @@ def main():
 
     pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
 
-    # Freeze everything
+    # Freeze base model
     pipe.vae.requires_grad_(False)
     pipe.text_encoder.requires_grad_(False)
     pipe.unet.requires_grad_(False)
 
     # ----------------------------
-    # Inject LoRA into attention
+    # Inject LoRA 
     # ----------------------------
     lora_attn_procs = {}
-    for name, attn in pipe.unet.attn_processors.items():
-        if name.endswith("attn1.processor") or name.endswith("attn2.processor"):
-            lora_attn_procs[name] = LoRAAttnProcessor(
-                hidden_size=attn.hidden_size,
-                cross_attention_dim=attn.cross_attention_dim,
-                rank=RANK,
-            )
-        else:
-            lora_attn_procs[name] = attn
+    for name in pipe.unet.attn_processors.keys():
+        lora_attn_procs[name] = LoRAAttnProcessor2_0(rank=RANK)
 
     pipe.unet.set_attn_processor(lora_attn_procs)
 
-    # Trainable params
-    params = [
-        p for p in pipe.unet.parameters() if p.requires_grad
-    ]
+    # Optimizer (ONLY LoRA params)
+    params = [p for p in pipe.unet.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=LR)
 
     dataset = MemeDataset(DATA_DIR)
@@ -124,11 +114,11 @@ def main():
 
         print(f"Epoch {epoch+1} done")
 
-    # Save LoRA
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     pipe.unet.save_attn_procs(OUTPUT_DIR)
 
-    print(f"LoRA saved to {OUTPUT_DIR}")
+    print(f" LoRA saved to {OUTPUT_DIR}")
 
 if __name__ == "__main__":
     main()
