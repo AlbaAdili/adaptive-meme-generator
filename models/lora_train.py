@@ -1,4 +1,4 @@
-
+# models/lora_train.py
 import os
 import torch
 from PIL import Image
@@ -9,21 +9,24 @@ from tqdm import tqdm
 from diffusers import StableDiffusionPipeline, DDPMScheduler
 from diffusers.models.attention_processor import LoRAAttnProcessor2_0
 
-# ---------------- CONFIG ----------------
+# ============================
+# CONFIG
+# ============================
 MODEL_ID = "runwayml/stable-diffusion-v1-5"
 DATA_DIR = "data/meme_train"
 OUTPUT_DIR = "lora_weights/meme_lora"
 
-EPOCHS = 1
+EPOCHS = 1          # keep 1 for demo
 BATCH_SIZE = 1
 LR = 1e-4
-RANK = 4
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 
 
-# ---------------- DATASET ----------------
+# ============================
+# DATASET (IMAGES ONLY)
+# ============================
 class MemeDataset(Dataset):
     def __init__(self, root):
         self.files = [
@@ -31,8 +34,8 @@ class MemeDataset(Dataset):
             for f in os.listdir(root)
             if f.lower().endswith(("png", "jpg", "jpeg"))
         ]
-        if not self.files:
-            raise RuntimeError("No images found")
+        if len(self.files) == 0:
+            raise RuntimeError(f"No images found in {root}")
 
         self.transform = transforms.Compose([
             transforms.Resize((512, 512)),
@@ -44,44 +47,59 @@ class MemeDataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        return self.transform(Image.open(self.files[idx]).convert("RGB"))
+        img = Image.open(self.files[idx]).convert("RGB")
+        return self.transform(img)
 
 
+# ============================
+# MAIN
+# ============================
 def main():
     print(f"Device: {DEVICE} | dtype: {DTYPE}")
 
+    # Load pipeline
     pipe = StableDiffusionPipeline.from_pretrained(
         MODEL_ID,
         torch_dtype=DTYPE,
-        safety_checker=None
+        safety_checker=None,
     ).to(DEVICE)
 
     pipe.scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
 
-    # Freeze base
+    # Freeze base model
     pipe.vae.requires_grad_(False)
     pipe.text_encoder.requires_grad_(False)
     pipe.unet.requires_grad_(False)
 
-    # -------- Inject LoRA (diffusers-native) --------
+    # ============================
+    # Inject LoRA (diffusers 0.36 compatible)
+    # ============================
     print("Injecting LoRA attention processors...")
+
     lora_procs = {
-       name: LoRAAttnProcessor2_0(lora_rank=RANK)
+        name: LoRAAttnProcessor2_0()
         for name in pipe.unet.attn_processors.keys()
     }
     pipe.unet.set_attn_processor(lora_procs)
 
     # Collect trainable params
     trainable_params = []
-    for _, p in pipe.unet.named_parameters():
-        if p.requires_grad:
-            trainable_params.append(p)
+    for _, module in pipe.unet.named_modules():
+        if hasattr(module, "parameters"):
+            for p in module.parameters():
+                if p.requires_grad:
+                    trainable_params.append(p)
+
+    if len(trainable_params) == 0:
+        raise RuntimeError("No trainable LoRA parameters found")
 
     print(f"Trainable params: {sum(p.numel() for p in trainable_params)}")
 
     optimizer = torch.optim.AdamW(trainable_params, lr=LR)
 
-    # Empty prompt embedding
+    # ============================
+    # Empty prompt embedding (image-only training)
+    # ============================
     with torch.no_grad():
         tokens = pipe.tokenizer(
             [""],
@@ -90,8 +108,12 @@ def main():
             max_length=pipe.tokenizer.model_max_length,
             return_tensors="pt",
         ).input_ids.to(DEVICE)
+
         empty_emb = pipe.text_encoder(tokens)[0]
 
+    # ============================
+    # Data
+    # ============================
     dataset = MemeDataset(DATA_DIR)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
@@ -99,40 +121,48 @@ def main():
     pipe.unet.train()
 
     for epoch in range(EPOCHS):
-        for batch in tqdm(loader, desc=f"Epoch {epoch+1}/{EPOCHS}"):
+        pbar = tqdm(loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
+        for batch in pbar:
             batch = batch.to(DEVICE, dtype=DTYPE)
 
             with torch.no_grad():
                 latents = pipe.vae.encode(batch).latent_dist.sample()
-                latents *= pipe.vae.config.scaling_factor
+                latents = latents * pipe.vae.config.scaling_factor
 
             noise = torch.randn_like(latents)
             timesteps = torch.randint(
                 0,
                 pipe.scheduler.config.num_train_timesteps,
-                (latents.size(0),),
-                device=DEVICE
+                (latents.shape[0],),
+                device=DEVICE,
             ).long()
 
             noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
-            encoder_hidden_states = empty_emb.repeat(latents.size(0), 1, 1)
+            encoder_hidden_states = empty_emb.repeat(latents.shape[0], 1, 1)
 
-           
             noise_pred = pipe.unet(
                 noisy_latents,
                 timesteps,
-                encoder_hidden_states=encoder_hidden_states
+                encoder_hidden_states=encoder_hidden_states,
             ).sample
 
-            loss = torch.nn.functional.mse_loss(noise_pred, noise)
+            loss = torch.nn.functional.mse_loss(
+                noise_pred.float(), noise.float()
+            )
 
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
 
+            pbar.set_postfix(loss=float(loss.detach().cpu()))
+
+    # ============================
+    # SAVE LoRA
+    # ============================
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     pipe.unet.save_attn_procs(OUTPUT_DIR)
-    print(f" LoRA saved to {OUTPUT_DIR}")
+
+    print(f"LoRA saved to: {OUTPUT_DIR}")
 
 
 if __name__ == "__main__":
