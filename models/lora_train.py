@@ -1,3 +1,4 @@
+# models/lora_train.py
 import os
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -5,34 +6,32 @@ from torchvision import transforms
 from PIL import Image
 from tqdm import tqdm
 
-from diffusers import StableDiffusionPipeline
+from diffusers import StableDiffusionPipeline, DDPMScheduler
 from peft import LoraConfig, get_peft_model
 
-# --------------------------------------------------
+# ------------------------------------------------------------
 # CONFIG
-# --------------------------------------------------
+# ------------------------------------------------------------
 MODEL_ID = "runwayml/stable-diffusion-v1-5"
 DATA_DIR = "data/meme_train"
 OUTPUT_DIR = "lora_weights/meme_lora"
 
-PROMPT = "a meme-style image, internet meme, humorous"
+BATCH_SIZE = 1
+EPOCHS = 2          # keep small (demo-quality)
+LR = 1e-4
 IMAGE_SIZE = 512
 
-BATCH_SIZE = 1
-MAX_STEPS = 300      
-LR = 1e-4
+device = "cuda" if torch.cuda.is_available() else "cpu"
+dtype = torch.float16 if device == "cuda" else torch.float32
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
-
-# --------------------------------------------------
-# DATASET
-# --------------------------------------------------
+# ------------------------------------------------------------
+# DATASET (images only, captions intentionally ignored)
+# ------------------------------------------------------------
 class MemeDataset(Dataset):
-    def __init__(self, image_dir):
-        self.images = [
-            os.path.join(image_dir, f)
-            for f in os.listdir(image_dir)
+    def __init__(self, folder):
+        self.files = [
+            os.path.join(folder, f)
+            for f in os.listdir(folder)
             if f.lower().endswith(("png", "jpg", "jpeg"))
         ]
 
@@ -43,39 +42,37 @@ class MemeDataset(Dataset):
         ])
 
     def __len__(self):
-        return len(self.images)
+        return len(self.files)
 
     def __getitem__(self, idx):
-        img = Image.open(self.images[idx]).convert("RGB")
-        return self.transform(img)
+        image = Image.open(self.files[idx]).convert("RGB")
+        return self.transform(image)
 
-# --------------------------------------------------
+# ------------------------------------------------------------
 # LOAD PIPELINE
-# --------------------------------------------------
+# ------------------------------------------------------------
 print("Loading Stable Diffusion...")
 pipe = StableDiffusionPipeline.from_pretrained(
     MODEL_ID,
-    torch_dtype=DTYPE,
-    safety_checker=None,
-).to(DEVICE)
+    torch_dtype=dtype,
+)
+pipe.to(device)
+pipe.safety_checker = None
 
-pipe.enable_attention_slicing()
-
-# Freeze everything
-pipe.vae.requires_grad_(False)
-pipe.text_encoder.requires_grad_(False)
 pipe.unet.requires_grad_(False)
+pipe.text_encoder.requires_grad_(False)
 
-# --------------------------------------------------
-# APPLY LoRA TO UNET
-# --------------------------------------------------
+noise_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
+
+# ------------------------------------------------------------
+# APPLY LoRA TO UNET (CORRECT WAY)
+# ------------------------------------------------------------
 lora_config = LoraConfig(
     r=8,
     lora_alpha=16,
-    target_modules=["to_q", "to_k", "to_v"],
-    lora_dropout=0.05,
+    lora_dropout=0.1,
     bias="none",
-    task_type="UNET",
+    target_modules=["to_q", "to_k", "to_v", "to_out.0"],
 )
 
 pipe.unet = get_peft_model(pipe.unet, lora_config)
@@ -83,76 +80,49 @@ pipe.unet.train()
 
 optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=LR)
 
-# --------------------------------------------------
-# DATA LOADER
-# --------------------------------------------------
+# ------------------------------------------------------------
+# TRAINING LOOP (REAL DIFFUSION LOSS)
+# ------------------------------------------------------------
 dataset = MemeDataset(DATA_DIR)
 loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-# --------------------------------------------------
-# TRAINING LOOP (REAL DIFFUSION TRAINING)
-# --------------------------------------------------
-print("🚀 Starting LoRA fine-tuning...")
-step = 0
+print(f"Training LoRA on {len(dataset)} meme images")
 
-for epoch in range(1000):  # loop until MAX_STEPS
-    for images in loader:
-        images = images.to(DEVICE, dtype=DTYPE)
+for epoch in range(EPOCHS):
+    for images in tqdm(loader, desc=f"Epoch {epoch+1}/{EPOCHS}"):
+        images = images.to(device, dtype=dtype)
 
-        # Encode images
-        latents = pipe.vae.encode(images).latent_dist.sample()
-        latents = latents * 0.18215
-
-        # Noise
-        noise = torch.randn_like(latents)
+        # Sample noise
+        noise = torch.randn_like(images)
         timesteps = torch.randint(
             0,
-            pipe.scheduler.config.num_train_timesteps,
-            (latents.shape[0],),
-            device=DEVICE,
+            noise_scheduler.num_train_timesteps,
+            (images.shape[0],),
+            device=device,
         ).long()
 
-        noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
-
-        # Text embeddings
-        text_inputs = pipe.tokenizer(
-            [PROMPT],
-            padding="max_length",
-            max_length=pipe.tokenizer.model_max_length,
-            return_tensors="pt",
-        )
-        text_embeddings = pipe.text_encoder(
-            text_inputs.input_ids.to(DEVICE)
-        )[0]
+        # Add noise
+        noisy_images = noise_scheduler.add_noise(images, noise, timesteps)
 
         # Predict noise
         noise_pred = pipe.unet(
-            noisy_latents,
+            noisy_images,
             timesteps,
-            encoder_hidden_states=text_embeddings,
+            encoder_hidden_states=None,
         ).sample
 
         loss = torch.nn.functional.mse_loss(noise_pred, noise)
-
         loss.backward()
+
         optimizer.step()
         optimizer.zero_grad()
 
-        step += 1
-        if step % 25 == 0:
-            print(f"Step {step}/{MAX_STEPS} | loss={loss.item():.4f}")
+    print(f"Epoch {epoch+1} completed")
 
-        if step >= MAX_STEPS:
-            break
-
-    if step >= MAX_STEPS:
-        break
-
-# --------------------------------------------------
-# SAVE LORA WEIGHTS
-# --------------------------------------------------
+# ------------------------------------------------------------
+# SAVE LoRA WEIGHTS
+# ------------------------------------------------------------
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 pipe.unet.save_pretrained(OUTPUT_DIR)
 
-print("LoRA training finished.")
-print(f"Weights saved to: {OUTPUT_DIR}")
+print(f"LoRA training finished. Saved to {OUTPUT_DIR}")
