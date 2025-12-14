@@ -60,6 +60,7 @@ print("Attaching PEFT LoRA to UNet...")
 lora_pipe.unet = PeftModel.from_pretrained(
     lora_pipe.unet,
     LORA_PATH,
+    local_files_only=True, 
 )
 lora_pipe.unet.eval()
 
