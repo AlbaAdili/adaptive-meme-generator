@@ -66,7 +66,7 @@ def main():
     # -------- Inject LoRA (diffusers-native) --------
     print("Injecting LoRA attention processors...")
     lora_procs = {
-        name: LoRAAttnProcessor2_0(rank=RANK)
+       name: LoRAAttnProcessor2_0(lora_rank=RANK)
         for name in pipe.unet.attn_processors.keys()
     }
     pipe.unet.set_attn_processor(lora_procs)
