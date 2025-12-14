@@ -16,7 +16,7 @@ MODEL_ID = "runwayml/stable-diffusion-v1-5"
 DATA_DIR = "data/meme_train"
 OUTPUT_DIR = "lora_weights/meme_lora"
 
-EPOCHS = 1
+EPOCHS = 2
 BATCH_SIZE = 1
 LR = 1e-5
 RANK = 8
@@ -86,14 +86,14 @@ def main():
     pipe.unet.train()
 
     # IMPORTANT FIX:
-    # Make LoRA trainable parameters FP32 so gradients are FP32 (no GradScaler issues)
+    # Make LoRA trainable parameters FP32 so gradients are FP32
     trainable = []
     for p in pipe.unet.parameters():
         if p.requires_grad:
             p.data = p.data.float()
             trainable.append(p)
 
-    print(f"✅ Trainable LoRA params: {sum(p.numel() for p in trainable)}")
+    print(f" Trainable LoRA params: {sum(p.numel() for p in trainable)}")
 
     optimizer = torch.optim.AdamW(trainable, lr=LR)
 
