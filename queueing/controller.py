@@ -33,7 +33,7 @@ class AdaptiveController:
     ):
         self.queue: asyncio.Queue = asyncio.Queue()
 
-        
+        # Validate LoRA paths
         fast_lora = fast_lora if fast_lora and os.path.exists(fast_lora) else None
         quality_lora = quality_lora if quality_lora and os.path.exists(quality_lora) else None
 
@@ -44,7 +44,7 @@ class AdaptiveController:
         # Fast model (SD 1.5 + LoRA)
         # --------------------------------------------------------
         self.fast_model = DiffusionGenerator(
-            model_id="runwayml/stable-diffusion-v1-5",
+            "runwayml/stable-diffusion-v1-5",  
             steps=20,
             device=DEVICE,
             size=(512, 512),
@@ -57,7 +57,7 @@ class AdaptiveController:
         if DEVICE == "mps":
             print("[Controller] SDXL disabled on Mac MPS — using SD 1.5")
             self.quality_model = DiffusionGenerator(
-                model_id="runwayml/stable-diffusion-v1-5",
+                "runwayml/stable-diffusion-v1-5",  
                 steps=30,
                 device=DEVICE,
                 size=(512, 512),
@@ -66,11 +66,11 @@ class AdaptiveController:
         else:
             # SDXL does NOT use your SD1.5 LoRA
             self.quality_model = DiffusionGenerator(
-                model_id="stabilityai/stable-diffusion-xl-base-1.0",
+                "stabilityai/stable-diffusion-xl-base-1.0",  
                 steps=50,
                 device=DEVICE,
                 size=(768, 768),
-                lora_path=None,  # correct: SDXL LoRA would be different
+                lora_path=None,
             )
 
         self.current_mode: str = "quality"
