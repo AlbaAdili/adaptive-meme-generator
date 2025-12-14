@@ -7,7 +7,8 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from diffusers import StableDiffusionPipeline, DDPMScheduler
-from peft import LoraConfig
+from peft import LoraConfig, get_peft_model_state_dict
+import safetensors.torch as st
 
 # =========================
 # CONFIG
@@ -22,11 +23,11 @@ LR = 1e-5
 RANK = 8
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-PIPE_DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32  # pipeline dtype
+PIPE_DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 
 
 # =========================
-# DATASET (IMAGES ONLY)
+# DATASET
 # =========================
 class MemeDataset(Dataset):
     def __init__(self, root):
@@ -69,7 +70,7 @@ def main():
     pipe.unet.requires_grad_(False)
 
     # =========================
-    # ADD PEFT LoRA (UNet only)
+    # ADD PEFT LoRA
     # =========================
     print("Adding PEFT LoRA adapter to UNet...")
 
@@ -85,19 +86,17 @@ def main():
     pipe.unet.set_adapter("default")
     pipe.unet.train()
 
-    # IMPORTANT FIX:
-    # Make LoRA trainable parameters FP32 so gradients are FP32
     trainable = []
     for p in pipe.unet.parameters():
         if p.requires_grad:
             p.data = p.data.float()
             trainable.append(p)
 
-    print(f" Trainable LoRA params: {sum(p.numel() for p in trainable)}")
+    print(f"Trainable LoRA params: {sum(p.numel() for p in trainable)}")
 
     optimizer = torch.optim.AdamW(trainable, lr=LR)
 
-    # Empty prompt embedding (style-only)
+    # Empty prompt embedding
     with torch.no_grad():
         tokens = pipe.tokenizer(
             [""],
@@ -106,7 +105,7 @@ def main():
             max_length=pipe.tokenizer.model_max_length,
             return_tensors="pt",
         ).input_ids.to(DEVICE)
-        empty_emb = pipe.text_encoder(tokens)[0]  # (1, 77, hidden)
+        empty_emb = pipe.text_encoder(tokens)[0]
 
     dataset = MemeDataset(DATA_DIR)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
@@ -117,10 +116,9 @@ def main():
         for batch in pbar:
             batch = batch.to(DEVICE, dtype=PIPE_DTYPE)
 
-            # Encode to latents
             with torch.no_grad():
                 latents = pipe.vae.encode(batch).latent_dist.sample()
-                latents = latents * pipe.vae.config.scaling_factor
+                latents *= pipe.vae.config.scaling_factor
 
             noise = torch.randn_like(latents)
             timesteps = torch.randint(
@@ -135,7 +133,6 @@ def main():
 
             optimizer.zero_grad(set_to_none=True)
 
-            # Forward (model in FP16), loss in FP32
             noise_pred = pipe.unet(
                 noisy_latents,
                 timesteps,
@@ -143,40 +140,31 @@ def main():
             ).sample
 
             loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
-
-            if torch.isnan(loss):
-                pbar.set_postfix(loss="nan-skip")
-                continue
-
             loss.backward()
+
             torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             optimizer.step()
 
             pbar.set_postfix(loss=float(loss.detach().cpu()))
-# =========================
-# SAVE LoRA (PEFT adapter)
-# =========================
-from peft import get_peft_model_state_dict
-import safetensors.torch as st
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+    # =========================
+    # SAVE LoRA (CORRECT)
+    # =========================
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-lora_state_dict = get_peft_model_state_dict(pipe.unet)
+    lora_state_dict = get_peft_model_state_dict(pipe.unet)
+    st.save_file(
+        lora_state_dict,
+        os.path.join(OUTPUT_DIR, "adapter_model.safetensors"),
+    )
 
-st.save_file(
-    lora_state_dict,
-    os.path.join(OUTPUT_DIR, "adapter_model.safetensors"),
-)
+    pipe.unet.peft_config["default"].save_pretrained(OUTPUT_DIR)
 
-
-pipe.unet.peft_config["default"].save_pretrained(OUTPUT_DIR)
-
-print("LoRA training finished")
-print(f"Saved to: {OUTPUT_DIR}")
-print("Files:")
-print(" - adapter_model.safetensors")
-print(" - adapter_config.json")
-
+    print(" LoRA training finished")
+    print(f"Saved to: {OUTPUT_DIR}")
+    print("Files:")
+    print(" - adapter_model.safetensors")
+    print(" - adapter_config.json")
 
 
 if __name__ == "__main__":
