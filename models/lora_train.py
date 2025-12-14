@@ -64,7 +64,7 @@ def main():
         safety_checker=None,
     ).to(DEVICE)
 
-    pipe.enable_xformers_memory_efficient_attention()
+  #  pipe.enable_xformers_memory_efficient_attention()
     pipe.unet.requires_grad_(False)
 
 
