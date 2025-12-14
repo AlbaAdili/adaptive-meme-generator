@@ -153,18 +153,30 @@ def main():
             optimizer.step()
 
             pbar.set_postfix(loss=float(loss.detach().cpu()))
+# =========================
+# SAVE LoRA (PEFT adapter)
+# =========================
+from peft import get_peft_model_state_dict
+import safetensors.torch as st
 
-    # =========================
-    # SAVE LoRA (adapter files)
-    # =========================
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    pipe.unet.save_pretrained(OUTPUT_DIR, safe_serialization=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    print("LoRA training finished")
-    print(f" Saved to: {OUTPUT_DIR}")
-    print("Expected files:")
-    print(" - adapter_model.safetensors")
-    print(" - adapter_config.json")
+lora_state_dict = get_peft_model_state_dict(pipe.unet)
+
+st.save_file(
+    lora_state_dict,
+    os.path.join(OUTPUT_DIR, "adapter_model.safetensors"),
+)
+
+
+pipe.unet.peft_config["default"].save_pretrained(OUTPUT_DIR)
+
+print("LoRA training finished")
+print(f"Saved to: {OUTPUT_DIR}")
+print("Files:")
+print(" - adapter_model.safetensors")
+print(" - adapter_config.json")
+
 
 
 if __name__ == "__main__":
