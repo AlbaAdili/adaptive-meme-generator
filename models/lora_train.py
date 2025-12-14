@@ -102,10 +102,16 @@ def main():
         lora_attn_procs[name] = make_lora_proc(RANK)
     pipe.unet.set_attn_processor(lora_attn_procs)
 
-    # Collect trainable params (LoRA only)
-    trainable_params = [p for p in pipe.unet.parameters() if p.requires_grad]
-    if len(trainable_params) == 0:
-        raise RuntimeError("No trainable LoRA parameters found. LoRA injection failed.")
+trainable_params = []
+for name, module in pipe.unet.named_modules():
+    if "lora" in name.lower():
+        for p in module.parameters():
+            p.requires_grad = True
+            trainable_params.append(p)
+
+if len(trainable_params) == 0:
+    raise RuntimeError("LoRA layers injected but no trainable params found")
+
 
     optimizer = torch.optim.AdamW(trainable_params, lr=LR)
 
