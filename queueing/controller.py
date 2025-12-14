@@ -1,3 +1,4 @@
+# queueing/controller.py
 import asyncio
 import time
 import os
@@ -19,8 +20,8 @@ else:
 
 print(f"[AdaptiveController] Using device: {DEVICE}")
 
-HIGH_LOAD = 5   # queue length at which we switch to fast mode
-LOW_LOAD = 2    # queue length below which we go back to quality mode
+HIGH_LOAD = 5
+LOW_LOAD = 2
 
 
 class AdaptiveController:
@@ -33,7 +34,6 @@ class AdaptiveController:
     ):
         self.queue: asyncio.Queue = asyncio.Queue()
 
-        # Validate LoRA paths
         fast_lora = fast_lora if fast_lora and os.path.exists(fast_lora) else None
         quality_lora = quality_lora if quality_lora and os.path.exists(quality_lora) else None
 
@@ -44,7 +44,7 @@ class AdaptiveController:
         # Fast model (SD 1.5 + LoRA)
         # --------------------------------------------------------
         self.fast_model = DiffusionGenerator(
-            "runwayml/stable-diffusion-v1-5",  
+            "runwayml/stable-diffusion-v1-5",
             steps=20,
             device=DEVICE,
             size=(512, 512),
@@ -57,16 +57,16 @@ class AdaptiveController:
         if DEVICE == "mps":
             print("[Controller] SDXL disabled on Mac MPS — using SD 1.5")
             self.quality_model = DiffusionGenerator(
-                "runwayml/stable-diffusion-v1-5",  
+                "runwayml/stable-diffusion-v1-5",
                 steps=30,
                 device=DEVICE,
                 size=(512, 512),
                 lora_path=quality_lora or fast_lora,
             )
         else:
-            # SDXL does NOT use your SD1.5 LoRA
+            # SDXL does NOT use SD1.5 LoRA
             self.quality_model = DiffusionGenerator(
-                "stabilityai/stable-diffusion-xl-base-1.0",  
+                "stabilityai/stable-diffusion-xl-base-1.0",
                 steps=50,
                 device=DEVICE,
                 size=(768, 768),
@@ -76,20 +76,14 @@ class AdaptiveController:
         self.current_mode: str = "quality"
 
     # --------------------------------------------------------
-    # Model selection logic
-    # --------------------------------------------------------
     async def choose_model(self) -> DiffusionGenerator:
         qsize = self.queue.qsize()
-
         if qsize >= HIGH_LOAD:
             self.current_mode = "fast"
         elif qsize <= LOW_LOAD:
             self.current_mode = "quality"
-
         return self.fast_model if self.current_mode == "fast" else self.quality_model
 
-    # --------------------------------------------------------
-    # Worker loop
     # --------------------------------------------------------
     async def worker(self):
         while True:
@@ -105,8 +99,8 @@ class AdaptiveController:
                 job_id = None
 
             queue_len = self.queue.qsize() + 1
-
             start_ts = time.time()
+
             model = await self.choose_model()
             mode = "fast" if model is self.fast_model else "quality"
 
@@ -114,14 +108,11 @@ class AdaptiveController:
             image_path, model_latency = model.generate(prompt, filename)
 
             frames = 1 if mode == "fast" else 8
-
-            if frames > 1:
-                gif_path = create_gif(
-                    [image_path] * frames,
-                    outpath=image_path.replace(".png", ".gif"),
-                )
-            else:
-                gif_path = image_path
+            gif_path = (
+                create_gif([image_path] * frames, image_path.replace(".png", ".gif"))
+                if frames > 1
+                else image_path
+            )
 
             try:
                 log_request(
@@ -137,9 +128,8 @@ class AdaptiveController:
             except TypeError:
                 log_request(prompt, mode, model_latency, frames)
 
-            jid = f" job={job_id}" if job_id else ""
             print(
-                f"[{mode.upper()}] '{prompt}'{jid} — "
+                f"[{mode.upper()}] '{prompt}' — "
                 f"{model_latency:.2f}s | frames={frames} | queue={queue_len}"
             )
 
