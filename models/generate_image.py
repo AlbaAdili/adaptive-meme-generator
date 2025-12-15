@@ -62,7 +62,7 @@ class DiffusionGenerator:
         if lora_path is not None:
             try:
                 self.pipe.load_lora_weights(lora_path)
-                print(f"[DiffusionGenerator] ✅ Loaded LoRA from {lora_path}")
+                print(f"[DiffusionGenerator] Loaded LoRA from {lora_path}")
             except Exception as e:
                 print(
                     f"[DiffusionGenerator] ⚠️ Failed to load LoRA from {lora_path}\n{e}"
