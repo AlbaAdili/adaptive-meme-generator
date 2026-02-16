@@ -7,9 +7,9 @@ from PIL import Image
 from diffusers import StableDiffusionPipeline
 from transformers import CLIPProcessor, CLIPModel
 
-# --------------------------------------------------
+
 # CONFIG
-# --------------------------------------------------
+
 BASE_MODEL = "runwayml/stable-diffusion-v1-5"
 LORA_PATH = "lora_weights/meme_lora"
 
@@ -27,16 +27,16 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 
-# --------------------------------------------------
+
 # LOAD CLIP
-# --------------------------------------------------
+
 print(" Loading CLIP...")
 clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(DEVICE)
 clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
-# --------------------------------------------------
+
 # LOAD BASE PIPELINE
-# --------------------------------------------------
+
 print("Loading base SD model...")
 base_pipe = StableDiffusionPipeline.from_pretrained(
     BASE_MODEL,
@@ -44,9 +44,8 @@ base_pipe = StableDiffusionPipeline.from_pretrained(
     safety_checker=None,
 ).to(DEVICE)
 
-# --------------------------------------------------
 # LOAD LORA PIPELINE
-# --------------------------------------------------
+
 print("Loading LoRA SD model...")
 lora_pipe = StableDiffusionPipeline.from_pretrained(
     BASE_MODEL,
@@ -65,9 +64,9 @@ lora_pipe.unet = PeftModel.from_pretrained(
 lora_pipe.unet.eval()
 
 
-# --------------------------------------------------
+
 # CLIP SCORE FUNCTION
-# --------------------------------------------------
+
 def clip_score(image: Image.Image, text: str) -> float:
     inputs = clip_processor(
         text=[text],
@@ -82,9 +81,9 @@ def clip_score(image: Image.Image, text: str) -> float:
 
     return score
 
-# --------------------------------------------------
+
 # RUN COMPARISON
-# --------------------------------------------------
+
 results = []
 
 print("Running base vs LoRA comparison...")
@@ -115,9 +114,7 @@ for prompt in tqdm(PROMPTS):
         "delta_clip": lora_clip - base_clip,
     })
 
-# --------------------------------------------------
-# SAVE RESULTS
-# --------------------------------------------------
+
 df = pd.DataFrame(results)
 csv_path = os.path.join(OUTPUT_DIR, "clip_comparison.csv")
 df.to_csv(csv_path, index=False)
